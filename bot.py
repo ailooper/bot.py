@@ -113,8 +113,18 @@ class WhatsAppBot:
     def send_message(self, phone_number, message):
         """Belirtilen numaraya mesaj gönderme - YENİ SEND BUTTON SELECTOR"""
         try:
-            # Telefon numarasını temizle
-            clean_phone = phone_number.replace("+", "").replace(" ", "")
+            # Telefon numarasını temizle ve formatla
+            clean_phone = phone_number.replace("+", "").replace(" ", "").replace("-", "")
+            
+            # Türkiye numarası kontrolü
+            if clean_phone.startswith("90") and len(clean_phone) == 12:
+                clean_phone = clean_phone
+            elif clean_phone.startswith("0") and len(clean_phone) == 11:
+                clean_phone = "90" + clean_phone[1:]
+            elif len(clean_phone) == 10 and clean_phone.startswith("5"):
+                clean_phone = "90" + clean_phone
+            
+            logger.info(f"📞 Gönderilecek telefon: {clean_phone}")
             
             # Mesajı URL encode et
             import urllib.parse
@@ -122,31 +132,39 @@ class WhatsAppBot:
             
             # WhatsApp direkt mesaj URL'si
             url = f"https://web.whatsapp.com/send?phone={clean_phone}&text={encoded_message}"
+            logger.info(f"🌐 WhatsApp URL: {url}")
+            
             self.driver.get(url)
+            time.sleep(3)  # Sayfa yüklenmesi için bekle
             
             # YENİ SEND BUTTON SELECTOR'LAR - Test ettiğimiz çalışan olanlar
             send_selectors = [
                 "span[aria-label='Send']",  # YENİ - Test kodunda çalışan
                 "button[aria-label='Send']",
                 "[data-testid='compose-btn-send']",  # ESKİ fallback
-                "span[data-icon='send']"
+                "span[data-icon='send']",
+                "button[data-testid='send']",
+                "span[data-icon='send']",
+                "div[role='button'][aria-label='Send']"
             ]
             
             send_button = None
             for selector in send_selectors:
                 try:
-                    WebDriverWait(self.driver, 15).until(
+                    logger.info(f"🔍 Send button aranıyor: {selector}")
+                    WebDriverWait(self.driver, 10).until(
                         EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
                     )
                     send_button = self.driver.find_element(By.CSS_SELECTOR, selector)
-                    logger.info(f"Send button bulundu: {selector}")
+                    logger.info(f"✅ Send button bulundu: {selector}")
                     break
-                except:
+                except Exception as e:
+                    logger.warning(f"❌ Send button bulunamadı: {selector} - {e}")
                     continue
             
             if send_button:
                 send_button.click()
-                logger.info(f"Mesaj gönderildi: {phone_number}")
+                logger.info(f"✅ Mesaj gönderildi: {phone_number}")
                 time.sleep(3)
                 
                 # Ana sayfaya geri dön
@@ -154,11 +172,11 @@ class WhatsAppBot:
                 time.sleep(2)
                 return True
             else:
-                logger.error("Send button bulunamadı!")
+                logger.error("❌ Send button bulunamadı! Tüm selector'lar denendi.")
                 return False
             
         except Exception as e:
-            logger.error(f"Mesaj gönderiminde hata: {e}")
+            logger.error(f"❌ Mesaj gönderiminde hata: {e}")
             return False
     
     def listen_messages(self):
@@ -285,6 +303,8 @@ class WhatsAppBot:
         try:
             # 1. URL'den telefon numarasını al (EN GÜVENİLİR)
             current_url = self.driver.current_url
+            logger.info(f"🔗 Mevcut URL: {current_url}")
+            
             if 'phone=' in current_url:
                 phone_match = re.search(r'phone=(\d+)', current_url)
                 if phone_match:
@@ -299,13 +319,19 @@ class WhatsAppBot:
                     "header span",
                     "h1", "h2", "h3",
                     "[data-testid='conversation-header'] span",
-                    "span[title]"
+                    "span[title]",
+                    "div[data-testid='conversation-header'] span",
+                    "header div span"
                 ]
                 
                 for selector in title_selectors:
                     title_elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    logger.info(f"🔍 {selector} selector'ında {len(title_elements)} element bulundu")
+                    
                     for element in title_elements:
                         text = element.text.strip()
+                        logger.info(f"📋 Element metni: '{text}'")
+                        
                         # Telefon formatını kontrol et
                         if re.search(r'\+?\d{10,15}', text):
                             clean_number = re.sub(r'[^\d+]', '', text)
@@ -317,6 +343,24 @@ class WhatsAppBot:
                                 
             except Exception as header_error:
                 logger.warning(f"Başlık okuma hatası: {header_error}")
+            
+            # 3. Son çare: Sayfadaki tüm metinleri tara
+            try:
+                all_texts = self.driver.find_elements(By.CSS_SELECTOR, "*")
+                for element in all_texts:
+                    try:
+                        text = element.text.strip()
+                        if re.search(r'\+?\d{10,15}', text):
+                            clean_number = re.sub(r'[^\d+]', '', text)
+                            if len(clean_number) >= 10:
+                                if not clean_number.startswith('+'):
+                                    clean_number = '+' + clean_number
+                                logger.info(f"🔍 Genel taramadan telefon: {clean_number}")
+                                return clean_number
+                    except:
+                        continue
+            except Exception as scan_error:
+                logger.warning(f"Genel tarama hatası: {scan_error}")
             
             logger.warning("❌ Telefon numarası bulunamadı")
             return None
