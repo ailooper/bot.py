@@ -51,6 +51,7 @@ class WhatsAppBot:
         self.driver = None
         self.last_message_count = 0
         self.processed_messages = set()
+        self.last_chat_scan = 0
         self.setup_driver()
         
     def setup_driver(self):
@@ -144,152 +145,227 @@ class WhatsAppBot:
             return False
     
     def listen_messages(self):
-        """WhatsApp mesajlarını dinleme - Sayfayı yenilemeden"""
+        """WhatsApp mesajlarını dinleme - YENİ YAKLAŞIM: Tüm sohbetleri tara"""
         global whatsapp_ready
         whatsapp_ready = True
-        logger.info("WhatsApp mesaj dinleme başlatıldı - Sayfayı yenilemeden dinleme modu")
+        logger.info("🚀 WhatsApp mesaj dinleme başlatıldı - TÜM SOHBET TARAMA MODU")
         
         while True:
             try:
-                # Sadece okunmamış sohbetleri kontrol et - sayfayı yenileme!
-                unread_chats = self.driver.find_elements(By.CSS_SELECTOR, 
-                    "div[data-testid='chat-list'] div[aria-label*='unread'], "
-                    "div[data-testid='chat-list'] div[title*='unread'], "
-                    "div[data-testid='chat-list'] span[data-testid='icon-unread-count']"
+                # Ana sayfa kontrolü
+                current_url = self.driver.current_url
+                if 'web.whatsapp.com' not in current_url or 'send' in current_url:
+                    logger.info("🔄 Ana sayfaya dönülüyor...")
+                    self.driver.get("https://web.whatsapp.com")
+                    time.sleep(3)
+                
+                # TÜM sohbetleri al (okunmuş/okunmamış fark etmez)
+                all_chats = self.driver.find_elements(By.CSS_SELECTOR, 
+                    "div[data-testid='chat-list'] div[data-testid='cell-frame-container']"
                 )
                 
-                logger.info(f"🔍 {len(unread_chats)} okunmamış sohbet bulundu")
+                logger.info(f"🔍 Toplam {len(all_chats)} sohbet bulundu")
                 
-                for chat in unread_chats:
+                # İlk 10 sohbeti kontrol et (son aktif olanlar)
+                for i, chat in enumerate(all_chats[:10]):
                     try:
+                        logger.info(f"📱 Sohbet {i+1} kontrol ediliyor...")
+                        
                         # Sohbete tıkla
                         chat.click()
                         time.sleep(2)
                         
                         # Telefon numarasını al
                         phone = self.extract_phone_from_current_chat()
-                        logger.info(f"📞 Sohbet telefonu: {phone}")
+                        logger.info(f"📞 Telefon: {phone}")
                         
-                        # Yeni mesajları kontrol et
-                        self.check_new_messages_in_chat(phone)
+                        # Bu sohbetteki yeni mesajları kontrol et
+                        if phone:
+                            self.check_new_messages_in_chat(phone)
                         
                         # Ana listeye geri dön
-                        back_button = self.driver.find_elements(By.CSS_SELECTOR, "[data-testid='back']")
-                        if back_button:
-                            back_button[0].click()
-                            time.sleep(1)
+                        self.driver.get("https://web.whatsapp.com")
+                        time.sleep(1)
                         
                     except Exception as e:
-                        logger.error(f"Sohbet işlemede hata: {e}")
+                        logger.error(f"Sohbet {i+1} işlemede hata: {e}")
+                        # Ana sayfaya dön
+                        self.driver.get("https://web.whatsapp.com")
+                        time.sleep(1)
                         continue
                 
-                time.sleep(3)  # 3 saniye bekle
+                logger.info("💤 5 saniye bekleniyor...")
+                time.sleep(5)
                 
             except Exception as e:
-                logger.error(f"Mesaj dinlemede ana hata: {e}")
-                time.sleep(5)
+                logger.error(f"Ana mesaj dinleme hatası: {e}")
+                time.sleep(10)
     
     def check_new_messages_in_chat(self, phone):
-        """Mevcut sohbetteki yeni mesajları kontrol et"""
+        """Mevcut sohbetteki yeni mesajları kontrol et - İYİLEŞTİRİLMİŞ"""
         try:
-            # Tüm mesaj konteynırlarını al
-            message_containers = self.driver.find_elements(By.CSS_SELECTOR, 
-                "div[data-testid='conversation-panel-messages'] div[data-testid='msg-container']"
-            )
+            # Sayfanın yüklenmesini bekle
+            time.sleep(2)
             
-            # Son 5 mesajı kontrol et (sadece gelen mesajlar)
-            for container in message_containers[-5:]:
+            # Tüm mesajları al (farklı selector'lar dene)
+            message_containers = []
+            
+            # Farklı selector'ları dene
+            selectors = [
+                "div[data-testid='conversation-panel-messages'] div[data-testid='msg-container']",
+                "div[data-testid='msg-container']", 
+                ".message-in, .message-out"
+            ]
+            
+            for selector in selectors:
+                containers = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                if containers:
+                    message_containers = containers
+                    logger.info(f"✅ {len(containers)} mesaj bulundu (selector: {selector})")
+                    break
+            
+            if not message_containers:
+                logger.warning("❌ Hiç mesaj bulunamadı")
+                return
+            
+            # Son 3 mesajı kontrol et
+            recent_messages = message_containers[-3:]
+            logger.info(f"🔍 Son {len(recent_messages)} mesaj kontrol ediliyor...")
+            
+            for i, container in enumerate(recent_messages):
                 try:
-                    # Gelen mesaj mı kontrol et (kendimizin gönderdiği değil)
-                    is_outgoing = container.find_elements(By.CSS_SELECTOR, "div[data-testid='msg-meta'] span[data-testid='msg-dblcheck']")
-                    if is_outgoing:  # Çift tik varsa bizim mesajımız, atla
-                        continue
-                    
-                    # Mesaj metnini al
-                    message_elements = container.find_elements(By.CSS_SELECTOR, 
-                        "span.selectable-text, div.selectable-text"
+                    # Giden mesaj mı kontrol et (çift tik var mı?)
+                    outgoing_indicators = container.find_elements(By.CSS_SELECTOR, 
+                        "span[data-testid='msg-dblcheck'], span[data-testid='msg-check']"
                     )
                     
-                    if message_elements:
-                        message_text = message_elements[0].text.strip().lower()
+                    if outgoing_indicators:
+                        logger.info(f"⬆️ Mesaj {i+1}: Giden mesaj (atlanıyor)")
+                        continue
+                    
+                    # Mesaj metnini al - farklı yolları dene
+                    message_text = None
+                    text_selectors = [
+                        "span.selectable-text",
+                        "div.selectable-text", 
+                        "span._ao3e",
+                        "div._ao3e"
+                    ]
+                    
+                    for text_selector in text_selectors:
+                        text_elements = container.find_elements(By.CSS_SELECTOR, text_selector)
+                        if text_elements and text_elements[0].text.strip():
+                            message_text = text_elements[0].text.strip().lower()
+                            break
+                    
+                    if not message_text:
+                        logger.info(f"📝 Mesaj {i+1}: Metin bulunamadı")
+                        continue
+                    
+                    logger.info(f"📨 Mesaj {i+1}: '{message_text}'")
+                    
+                    # Bu mesajı daha önce işledik mi?
+                    current_time = int(time.time())
+                    msg_id = f"{phone}_{message_text}_{current_time // 30}"  # 30 saniye grupları
+                    
+                    if msg_id not in self.processed_messages:
+                        self.processed_messages.add(msg_id)
                         
-                        # Bu mesajı daha önce işledik mi?
-                        msg_id = f"{phone}_{message_text}_{int(time.time() // 10)}"  # 10 saniye aralıklarla grupla
+                        # Memory temizliği
+                        if len(self.processed_messages) > 500:
+                            self.processed_messages = set(list(self.processed_messages)[-250:])
                         
-                        if msg_id not in self.processed_messages:
-                            self.processed_messages.add(msg_id)
-                            
-                            # Eski mesaj ID'lerini temizle (memory leak önleme)
-                            if len(self.processed_messages) > 1000:
-                                self.processed_messages = set(list(self.processed_messages)[-500:])
-                            
-                            logger.info(f"📨 Yeni mesaj: '{message_text}' - Telefon: {phone}")
-                            
-                            # Mesajı işle
-                            self.process_message(phone, message_text)
+                        logger.info(f"🆕 YENİ MESAJ ALGILANDI: '{message_text}' - {phone}")
+                        
+                        # Mesajı işle
+                        self.process_message(phone, message_text)
+                    else:
+                        logger.info(f"🔄 Mesaj daha önce işlendi: {msg_id}")
                         
                 except Exception as msg_error:
-                    logger.error(f"Mesaj okuma hatası: {msg_error}")
+                    logger.error(f"Mesaj {i+1} okuma hatası: {msg_error}")
                     continue
                     
         except Exception as e:
-            logger.error(f"Sohbet mesajlarını kontrol etme hatası: {e}")
+            logger.error(f"Sohbet mesajları kontrol hatası: {e}")
     
     def extract_phone_from_current_chat(self):
-        """Mevcut sohbetten telefon numarasını çıkarma - İyileştirilmiş"""
+        """Mevcut sohbetten telefon numarasını çıkarma - SUPER İYİLEŞTİRİLMİŞ"""
         try:
-            # Önce URL'den telefon numarasını almaya çalış
+            # 1. URL'den telefon numarasını al (en güvenilir)
             current_url = self.driver.current_url
             if 'phone=' in current_url:
                 phone_match = re.search(r'phone=(\d+)', current_url)
                 if phone_match:
                     phone = '+' + phone_match.group(1)
-                    logger.info(f"URL'den telefon numarası: {phone}")
+                    logger.info(f"🎯 URL'den telefon: {phone}")
                     return phone
             
-            # Sohbet başlığından telefon numarasını al
+            # 2. Sayfa başlığından al
             try:
-                header_elements = self.driver.find_elements(By.CSS_SELECTOR, 
+                title_elements = self.driver.find_elements(By.CSS_SELECTOR, 
                     "[data-testid='conversation-header'] span, "
-                    "[data-testid='conversation-header'] div"
+                    "header span, "
+                    "h1, h2, h3"
                 )
                 
-                for element in header_elements:
+                for element in title_elements:
                     text = element.text.strip()
-                    # Telefon numarası formatlarını kontrol et
-                    clean_text = re.sub(r'[^\d+]', '', text)
-                    if re.match(r'^\+?\d{10,15}$', clean_text):
-                        if not clean_text.startswith('+'):
-                            clean_text = '+' + clean_text
-                        logger.info(f"Başlıktan telefon numarası: {clean_text}")
-                        return clean_text
-                        
+                    # Telefon formatını kontrol et
+                    if re.search(r'\+?\d{10,15}', text):
+                        clean_number = re.sub(r'[^\d+]', '', text)
+                        if len(clean_number) >= 10:
+                            if not clean_number.startswith('+'):
+                                clean_number = '+' + clean_number
+                            logger.info(f"📋 Başlıktan telefon: {clean_number}")
+                            return clean_number
+                            
             except Exception as header_error:
                 logger.warning(f"Başlık okuma hatası: {header_error}")
             
-            logger.warning("Telefon numarası bulunamadı")
+            # 3. Sayfadaki tüm telefon benzeri metinleri tara
+            try:
+                all_elements = self.driver.find_elements(By.CSS_SELECTOR, "span, div")
+                for element in all_elements:
+                    text = element.text.strip()
+                    if text and re.match(r'^\+\d{10,15}$', text.replace(' ', '')):
+                        logger.info(f"🔍 Genel taramadan telefon: {text}")
+                        return text.replace(' ', '')
+                        
+            except Exception as scan_error:
+                logger.warning(f"Genel tarama hatası: {scan_error}")
+            
+            logger.warning("❌ Telefon numarası bulunamadı")
             return None
             
         except Exception as e:
-            logger.error(f"Telefon numarası çıkarma hatası: {e}")
+            logger.error(f"Telefon çıkarma ana hatası: {e}")
             return None
     
     def process_message(self, phone, message):
-        """Gelen mesajı işleme - İyileştirilmiş"""
+        """Gelen mesajı işleme - ULTRA İYİLEŞTİRİLMİŞ"""
         try:
             if not phone:
-                logger.warning("Telefon numarası bulunamadığı için mesaj işlenemiyor")
+                logger.warning("⚠️ Telefon numarası yok, mesaj işlenemiyor")
                 return
                 
             message = message.strip().lower()
-            logger.info(f"🔄 Mesaj işleniyor: '{message}' - Telefon: {phone}")
+            logger.info(f"🔄 MESAJ İŞLENİYOR: '{message}' - Telefon: {phone}")
             
-            # Anahtar kelimeleri kontrol et
-            if any(keyword in message for keyword in ["oluşturma kodu", "düzenleme kodu", "oluşturma", "düzenleme"]):
+            # Anahtar kelime kontrolü - daha esnek
+            keywords = ["oluşturma kodu", "düzenleme kodu", "oluşturma", "düzenleme", "kod", "otp"]
+            
+            if any(keyword in message for keyword in keywords):
                 # Türü belirle
-                tur = "oluşturma" if "oluşturma" in message else "düzenleme"
+                if "oluşturma" in message:
+                    tur = "oluşturma"
+                elif "düzenleme" in message:
+                    tur = "düzenleme"
+                else:
+                    # Default olarak oluşturma
+                    tur = "oluşturma"
                 
-                logger.info(f"🎯 OTP talebi algılandı: {tur}")
+                logger.info(f"🎯 OTP TALEBİ ALGILANDI: '{tur}' - {phone}")
                 
                 # OTP'yi bul ve gönder
                 otp_code = self.get_otp_from_pool(phone, tur)
@@ -297,38 +373,27 @@ class WhatsAppBot:
                 if otp_code:
                     response_message = f"🔐 OTP Kodunuz: {otp_code}\n\nBu kod 5 dakika geçerlidir."
                     if self.send_message(phone, response_message):
-                        logger.info(f"✅ OTP başarıyla gönderildi: {phone} - {tur} - {otp_code}")
+                        logger.info(f"✅ OTP BAŞARIYLA GÖNDERİLDİ: {phone} - {tur} - {otp_code}")
                     else:
-                        logger.error(f"❌ OTP gönderilemedi: {phone}")
+                        logger.error(f"❌ OTP GÖNDERİLEMEDİ: {phone}")
                 else:
                     error_message = "❌ Geçerli bir OTP kodu bulunamadı.\n\nLütfen önce işleminizi başlatın ve 5 dakika içinde kod talep edin."
                     self.send_message(phone, error_message)
-                    logger.warning(f"⚠️ OTP bulunamadı: {phone} - {tur}")
+                    logger.warning(f"⚠️ OTP BULUNAMADI: {phone} - {tur}")
             else:
-                logger.info(f"📝 Bilinmeyen mesaj formatı: '{message}'")
+                logger.info(f"📝 Bilinmeyen mesaj: '{message}'")
                         
         except Exception as e:
-            logger.error(f"Mesaj işlemede hata: {e}")
+            logger.error(f"Mesaj işleme hatası: {e}")
     
     def get_otp_from_pool(self, phone, tur):
-        """OTP havuzundan kod alma - İyileştirilmiş telefon numarası eşleştirme"""
+        """OTP havuzundan kod alma - SÜPER İYİLEŞTİRİLMİŞ"""
         with otp_lock:
-            # Telefon numarasını normalize et
-            normalized_phone = self.normalize_phone(phone)
+            # Telefon numarası formatlarını normalize et
+            possible_phones = self.generate_phone_variants(phone)
             
-            # Mümkün olan tüm telefon formatlarını dene
-            possible_phones = [
-                phone,
-                normalized_phone,
-                '+90' + phone.replace('+', '') if not phone.startswith('+90') else phone,
-                '+355' + phone.replace('+', '') if not phone.startswith('+355') else phone
-            ]
-            
-            # Benzersiz olanları al
-            possible_phones = list(set(possible_phones))
-            
-            logger.info(f"🔍 OTP aranıyor. Denenen formatlar: {possible_phones}")
-            logger.info(f"📋 Havuzdaki anahtarlar: {list(otp_pool.keys())}")
+            logger.info(f"🔍 OTP ARANACAK FORMATLAR: {possible_phones}")
+            logger.info(f"📋 HAVUZDAKI ANAHTARLAR: {list(otp_pool.keys())}")
             
             for test_phone in possible_phones:
                 key = (test_phone, tur)
@@ -339,14 +404,49 @@ class WhatsAppBot:
                         # OTP'yi kullan ve sil
                         otp_code = otp_data["otp"]
                         del otp_pool[key]
-                        logger.info(f"✅ OTP bulundu ve silindi: {key}")
+                        logger.info(f"✅ OTP BULUNDU VE SİLİNDİ: {key}")
                         return otp_code
                     else:
                         # Süresi dolmuş, sil
                         del otp_pool[key]
-                        logger.info(f"⏰ Süresi dolmuş OTP silindi: {key}")
+                        logger.info(f"⏰ SÜRESİ DOLMUŞ OTP SİLİNDİ: {key}")
             
+            logger.warning(f"❌ OTP BULUNAMADI - Telefon: {phone}, Tür: {tur}")
             return None
+    
+    def generate_phone_variants(self, phone):
+        """Telefon numarası varyantları üret"""
+        if not phone:
+            return []
+            
+        variants = set()
+        
+        # Orijinal
+        variants.add(phone)
+        
+        # Sadece rakamlar
+        digits = re.sub(r'\D', '', phone)
+        
+        # Farklı formatlar
+        if digits:
+            variants.add('+' + digits)
+            variants.add(digits)
+            
+            # Türkiye formatları
+            if len(digits) == 10 and digits.startswith('5'):
+                variants.add('+90' + digits)
+            elif len(digits) == 11 and digits.startswith('05'):
+                variants.add('+90' + digits[1:])
+            elif len(digits) == 12 and digits.startswith('90'):
+                variants.add('+' + digits)
+            
+            # Arnavutluk formatları  
+            if len(digits) == 9 and digits.startswith('6'):
+                variants.add('+355' + digits)
+            elif len(digits) == 12 and digits.startswith('355'):
+                variants.add('+' + digits)
+        
+        return list(variants)
     
     def normalize_phone(self, phone):
         """Telefon numarasını normalize et"""
@@ -430,7 +530,7 @@ def receive_otp():
                 "timestamp": datetime.now()
             }
         
-        logger.info(f"📥 OTP kaydedildi: {tel} - {tur} - {otp}")
+        logger.info(f"📥 OTP KAYDEDİLDİ: {tel} - {tur} - {otp}")
         
         return jsonify({
             "message": "OTP başarıyla kaydedildi",
